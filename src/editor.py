@@ -39,9 +39,11 @@ class ScienceEditor:
                 print(f"Loading local GGUF: {self.model_name}")
                 self.model = Llama(
                     model_path=self.model_name,
-                    n_ctx=32768, # Reduced to 32k to fit in 40GB VRAM safely (262k requires ~40GB just for KV!)
-                    n_gpu_layers=n_gpu, 
-                    n_batch=2048, # High batch size for A100 prompt processing speed
+                    n_ctx=32768, 
+                    n_gpu_layers=-1, # Ensure all layers go to GPU
+                    main_gpu=0,      # Explicitly select the A100 (device 0)
+                    n_batch=2048, 
+                    use_mmap=False,  # <--- CRITICAL: Disable mmap to force VRAM loading
                     verbose=True
                 )
             else:
@@ -51,8 +53,10 @@ class ScienceEditor:
                     repo_id=self.model_name,
                     filename="Qwen3-4B-Instruct-2507-Q5_K_M.gguf",
                     n_ctx=32768, 
-                    n_gpu_layers=n_gpu,
+                    n_gpu_layers=-1,
+                    main_gpu=0,
                     n_batch=2048, 
+                    use_mmap=False,  # <--- CRITICAL: Disable mmap
                     verbose=True
                 )
         else:
