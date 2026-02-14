@@ -1,0 +1,12 @@
+
+        body { font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: auto; padding: 2em; background: #f4f4f9; color: #333; }
+        .container { background: white; padding: 3em; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1 { border-bottom: 2px solid #007acc; padding-bottom: 0.2em; color: #007acc; }
+        h2 { margin-top: 2em; color: #444; }
+        .visual-abstract { background: #eef; padding: 1em; border-radius: 8px; margin: 2em 0; border: 1px solid #ccd; }
+        .gallery { display: flex; gap: 1em; overflow-x: auto; padding: 1em 0; }
+        .article-img { max-height: 300px; border: 1px solid #ddd; border-radius: 4px; }
+        pre { background: #2d2d2d; color: #ccc; padding: 1em; overflow-x: auto; border-radius: 4px; }
+        a { color: #007acc; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        

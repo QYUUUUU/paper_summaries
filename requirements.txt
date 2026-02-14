@@ -1,0 +1,11 @@
+pypdf
+pymupdf
+networkx
+python-louvain
+pandas
+tqdm
+scikit-learn
+llama-cpp-python
+pyvis
+sentence-transformers
+markdown
