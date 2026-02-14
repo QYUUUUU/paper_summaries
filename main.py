@@ -127,15 +127,19 @@ def main():
     print("Linking papers via Citation Intent Analysis...")
     paper_titles = {pid: data['title'] for pid, data in paper_store.items()}
     
+    # Pre-calculate titles for faster lookup
+    title_lookup = [(pid, title, title.lower().replace("_", " ").strip()) 
+                   for pid, title in paper_titles.items() 
+                   if len(title) > 10]
+
     for source_pid, source_data in tqdm(paper_store.items(), desc="Analyzing Citations"):
         source_text = source_data['text'].lower()
         
-        for target_pid, target_title in paper_titles.items():
+        # Optimization: limit fuzzy search window or use Aho-Corasick if list is huge
+        # For now, simple string matching is fast enough for <1000 papers.
+        
+        for target_pid, original_title, t_clean in title_lookup:
             if source_pid == target_pid: continue
-            
-            # clean title for matching (ignore extremely short titles to avoid false positives)
-            t_clean = target_title.lower().replace("_", " ").strip()
-            if len(t_clean) < 10: continue
             
             if t_clean in source_text:
                 # Found a citation overlap
@@ -144,8 +148,14 @@ def main():
                 end = min(len(source_text), idx + 250 + len(t_clean))
                 context_snippet = source_data['text'][start:end] # Get original case text
                 
+                # OPTIMIZATION: Skip if context looks like a bibliography entry
+                # e.g., strictly formatted lines with page numbers/dates at the end
+                if re.search(r'\d{4}\.\s*$', context_snippet.strip()) or "References" in source_data['text'][max(0, idx-100):idx]:
+                     network.add_citation_link(source_pid, target_pid, intent="BACKGROUND")
+                     continue
+
                 # Classify the intent of this citation (Background, Comparison, etc.)
-                intent = editor.classify_citation_intent(context_snippet, target_title)
+                intent = editor.classify_citation_intent(context_snippet, original_title)
                 
                 network.add_citation_link(source_pid, target_pid, intent=intent)
     

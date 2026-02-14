@@ -17,8 +17,13 @@ class ScienceEditor:
         self.use_gpu = use_gpu
         self.model = None # Lazy load
         self.tokenizer = None
-        self.backend = "llama" if "gguf" in model_name.lower() else "transformers"
-        print(f"ScienceEditor initialized. Model '{model_name}' will be loaded on first use (GPU={self.use_gpu}).")
+        
+        # Auto-detect local GGUF if extension is missing
+        if not os.path.exists(self.model_name) and os.path.exists(self.model_name + ".gguf"):
+            self.model_name += ".gguf"
+
+        self.backend = "llama" if "gguf" in self.model_name.lower() else "transformers"
+        print(f"ScienceEditor initialized. Model '{self.model_name}' will be loaded on first use (GPU={self.use_gpu}).")
 
     def _load_model(self):
         """Internal method to load the model only when needed."""
@@ -26,6 +31,7 @@ class ScienceEditor:
         
         if self.backend == "llama":
             # Determine layer offloading based on GPU flag
+            # Use a large number instead of -1 if -1 is problematic, but -1 is standard.
             n_gpu = -1 if self.use_gpu else 0
             
             # Check if it's a local file or a HF Repo
@@ -33,8 +39,9 @@ class ScienceEditor:
                 print(f"Loading local GGUF: {self.model_name}")
                 self.model = Llama(
                     model_path=self.model_name,
-                    n_ctx=8192, # Higher context for scientific papers
-                    n_gpu_layers=n_gpu, # Offload to GPU if enabled
+                    n_ctx=32768, # Reduced to 32k to fit in 40GB VRAM safely (262k requires ~40GB just for KV!)
+                    n_gpu_layers=n_gpu, 
+                    n_batch=2048, # High batch size for A100 prompt processing speed
                     verbose=True
                 )
             else:
@@ -43,8 +50,9 @@ class ScienceEditor:
                 self.model = Llama.from_pretrained(
                     repo_id=self.model_name,
                     filename="Qwen3-4B-Instruct-2507-Q5_K_M.gguf",
-                    n_ctx=8192,
+                    n_ctx=32768, 
                     n_gpu_layers=n_gpu,
+                    n_batch=2048, 
                     verbose=True
                 )
         else:
