@@ -14,10 +14,10 @@ class ScienceEditor:
     """
     def __init__(self, model_name: str, use_gpu: bool = True):
         self.model_name = model_name
-        self.use_gpu = use_gpu
-        self.model = None # Lazy load
+        self.use_gpu = use_gpu and torch.cuda.is_available()  # Only enable if GPU available
+        self.model = None  # Lazy load
         self.tokenizer = None
-        
+
         # Auto-detect local GGUF if extension is missing
         if not os.path.exists(self.model_name) and os.path.exists(self.model_name + ".gguf"):
             self.model_name += ".gguf"
@@ -25,25 +25,45 @@ class ScienceEditor:
         self.backend = "llama" if "gguf" in self.model_name.lower() else "transformers"
         print(f"ScienceEditor initialized. Model '{self.model_name}' will be loaded on first use (GPU={self.use_gpu}).")
 
+    def _detect_gpu_layers(self, total_layers: int = 32) -> int:
+        """
+        Detect a safe number of layers to load on GPU based on VRAM.
+        Defaults to 50% of layers if VRAM is limited.
+        """
+        if not self.use_gpu:
+            return 0
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            free_gb = mem_info.free / 1024**3
+            # Heuristic: assume each layer ~1GB
+            n_gpu_layers = min(total_layers, max(1, int(free_gb * 0.8)))
+            return n_gpu_layers
+        except:
+            # Fallback: assume all layers to GPU
+            return -1
+
     def _load_model(self):
         """Internal method to load the model only when needed."""
         print(f"Loading Model: {self.model_name}...")
-        
+
         if self.backend == "llama":
-            # Determine layer offloading based on GPU flag
-            # Use a large number instead of -1 if -1 is problematic, but -1 is standard.
-            n_gpu = -1 if self.use_gpu else 0
-            
+            # Determine GPU layers
+            n_gpu_layers = self._detect_gpu_layers()
+            main_gpu = 0 if self.use_gpu else -1
+
             # Check if it's a local file or a HF Repo
             if os.path.exists(self.model_name):
                 print(f"Loading local GGUF: {self.model_name}")
                 self.model = Llama(
                     model_path=self.model_name,
-                    n_ctx=32768, 
-                    n_gpu_layers=-1, # Ensure all layers go to GPU
-                    main_gpu=0,      # Explicitly select the A100 (device 0)
-                    n_batch=2048, 
-                    use_mmap=False,  # <--- CRITICAL: Disable mmap to force VRAM loading
+                    n_ctx=32768,
+                    n_gpu_layers=n_gpu_layers,
+                    main_gpu=main_gpu,
+                    n_batch=2048,
+                    use_mmap=not self.use_gpu,  # mmap only if CPU fallback
                     verbose=True
                 )
             else:
@@ -52,11 +72,11 @@ class ScienceEditor:
                 self.model = Llama.from_pretrained(
                     repo_id=self.model_name,
                     filename="Qwen3-4B-Instruct-2507-Q5_K_M.gguf",
-                    n_ctx=32768, 
-                    n_gpu_layers=-1,
-                    main_gpu=0,
-                    n_batch=2048, 
-                    use_mmap=False,  # <--- CRITICAL: Disable mmap
+                    n_ctx=32768,
+                    n_gpu_layers=n_gpu_layers,
+                    main_gpu=main_gpu,
+                    n_batch=2048,
+                    use_mmap=not self.use_gpu,
                     verbose=True
                 )
         else:
@@ -67,7 +87,7 @@ class ScienceEditor:
                 torch_dtype="auto",
                 device_map=device_map
             )
-    
+
     def _generate(self, prompt_text: str, max_new_tokens: int = 4096) -> str:
         """Internal helper for generation using the Transformers pipeline."""
         if self.model is None:
@@ -104,12 +124,8 @@ class ScienceEditor:
             output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
             return self.tokenizer.decode(output_ids, skip_special_tokens=True)
 
+    # --- Rest of your methods remain exactly the same ---
     def extract_rich_concepts(self, text: str, paper_id: str) -> list:
-        """
-        Extracts complex relationships.
-        We want to know if a paper OPTIMIZES, CRITIQUES, or APPLIES a concept.
-        """
-        # CRITICAL UPDATE: High context limit to capture full nuance
         prompt = f"""You are an NLP Knowledge Graph Architect.
 Extract entities (Models, Metrics, Datasets, Architectures) and their specific relationship to the paper.
 Relations must be specific: "OPTIMIZES", "INTRODUCES", "CRITIQUES", "USES", "TRAINS_ON", "EVALUATES_ON".
@@ -122,11 +138,6 @@ JSON:
         return self._clean_json(self._generate(prompt, max_new_tokens=300))
 
     def extract_tdms_schema(self, text: str, paper_id: str) -> list:
-        """
-        Extracts entities strictly adhering to the TDMS (Task, Dataset, Metric, Method) schema.
-        Also attempts to align with Computer Science Ontology (CSO) concepts.
-        """
-        # CRITICAL UPDATE: High context limit to read full Methods/Results
         prompt = f"""You are a Scientific Knowledge Graph Builder.
 Extract entities strictly matching these types:
 - TASK (e.g., "Extractive Summarization", "Question Answering")
@@ -144,10 +155,6 @@ JSON:
         return self._clean_json(self._generate(prompt, max_new_tokens=500))
 
     def classify_citation_intent(self, context_text: str, cited_paper_title: str) -> str:
-        """
-        Determines the semantic intent of a citation based on the context.
-        Categories: BACKGROUND, METHOD, COMPARISON, CONTRADICTION, EXTENSION.
-        """
         prompt = f"""Classify the citation intent for "{cited_paper_title}" based on the text.
 Categories:
 - BACKGROUND (Theoretical foundation, definitions)
@@ -161,27 +168,18 @@ Intent:
 """
         intent = self._generate(prompt, max_new_tokens=20).strip().upper()
         valid_intents = ["BACKGROUND", "METHOD", "COMPARISON", "CONTRADICTION", "EXTENSION"]
-        
-        # Simple fuzzy matching or fallback
         for v in valid_intents:
             if v in intent:
                 return v
-        return "BACKGROUND" # Default
+        return "BACKGROUND"
 
     def align_entity_canonical(self, entity_name: str, existing_entities: list) -> str:
-        """
-        Uses LLM to map a raw entity to a canonical list if a close match exists.
-        Simulates Entity Resolution.
-        """
         if not existing_entities:
             return entity_name
-            
-        # Optimization: Only show LLM the top 20 lexically similar candidates to avoid context overflow
         matches = difflib.get_close_matches(entity_name, existing_entities, n=20, cutoff=0.4)
         if not matches:
-             return entity_name
-
-        candidates = ", ".join(matches) 
+            return entity_name
+        candidates = ", ".join(matches)
         prompt = f"""Canonicalize the entity name. If it matches an existing entity (synonym/acronym), return the existing one. Otherwise return the new one.
 Existing: {candidates}
 
@@ -191,7 +189,6 @@ Canonical Name:
         return self._generate(prompt, max_new_tokens=20).strip()
 
     def summarize_community(self, paper_titles: list) -> str:
-        """Generates a high-level theme for a cluster of papers."""
         titles_str = "\n".join([f"- {t}" for t in paper_titles])
         prompt = f"""You are an expert NLP classifier. 
 Analyze the following list of research paper titles and determine the single most specific research sub-field they belong to.
@@ -205,9 +202,6 @@ Specific Sub-Field:"""
         return self._generate(prompt, max_new_tokens=50).strip()
 
     def generate_contrastive_summary(self, paper_ids: list, context_str: str) -> dict:
-        """
-        Synthesizes a community report focusing on contrastive analysis.
-        """
         prompt = f"""You are a Lead Researcher performing a Meta-Analysis.
 OBJECTIVE: Synthesize the findings of the provided papers into a coherent technical narrative.
 INSTRUCTIONS:
@@ -221,25 +215,16 @@ INSTRUCTIONS:
 FORMAT: Markdown with sections.
 
 CONTEXT:
-{context_str[:12000]} # Truncate to fit context
+{context_str[:12000]}
 
 ANALYSIS:
 # Community Synthesis
 """
         content = self._generate(prompt, max_new_tokens=4096)
-        
-        return {
-            "title": "Community Analysis",
-            "body": content
-        }
+        return {"title": "Community Analysis", "body": content}
 
     def write_technical_article(self, task: dict, context_text: str) -> dict:
-        """
-        Writes a deep technical analysis based on the topology type.
-        """
         task_type = task['type']
-        
-        # 1. Define the Persona and Structure based on Graph Topology
         if task_type == "COMPARATIVE_ANALYSIS":
             persona = "You are a Benchmarking Engineer."
             instruction = "Compare the methodologies strictly. Which handles compute better? Which is more data efficient? Use math/logic, not fluff."
@@ -270,11 +255,7 @@ ARTICLE:
 # {task['subject']}
 """
         content = self._generate(prompt, max_new_tokens=4096)
-        
-        return {
-            "title": task['subject'],
-            "body": content
-        }
+        return {"title": task['subject'], "body": content}
 
     def _clean_json(self, text: str) -> list:
         try:
