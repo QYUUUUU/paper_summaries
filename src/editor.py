@@ -42,6 +42,14 @@ class ScienceEditor:
                 device_map=device_map,
                 trust_remote_code=True
             )
+            
+    # Optional: Compile the model for further speedup (Linux/A100 only)
+            if self.use_gpu:
+                 try:
+                     print("Compiling model with torch.compile() for max speed...")
+                     self.model = torch.compile(self.model)
+                 except Exception as e:
+                     print(f"Compilation skipped: {e}")
             print("Model loaded successfully.")
         except Exception as e:
             print(f"CRITICAL ERROR loading model: {e}")
