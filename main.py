@@ -16,7 +16,7 @@ PAPERS_DIR = "./papers"
 OUTPUT_DIR = "./output"
     # CRITICAL UPDATE: Per "Top-Notch" requirements, 1.5B is insufficient for complex graph reasoning.
 # Switched to Qwen 2.5 32B (Q5_K_M) - High performance model for A100 40GB.
-MODEL_PATH = "./models/Qwen2.5-32B-Instruct-Q5_K_M.gguf" 
+MODEL_PATH = "Qwen/Qwen2.5-32B-Instruct" 
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
 def smart_chunker(text: str):

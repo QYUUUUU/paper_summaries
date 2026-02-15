@@ -4,128 +4,81 @@ import json
 import re
 import difflib
 import os
-from llama_cpp import Llama
 
 class ScienceEditor:
     """
     Object 3: The LLM Wrapper. 
     Focuses on Technical Depth and Graph-Aware Writing.
-    Supports both Transformers (standard) and Llama.cpp (GGUF).
+    Now exclusively uses Transformers for maximum A100 performance.
     """
     def __init__(self, model_name: str, use_gpu: bool = True):
         self.model_name = model_name
-        self.use_gpu = use_gpu and torch.cuda.is_available()  # Only enable if GPU available
+        # Check for CUDA
+        self.use_gpu = use_gpu and torch.cuda.is_available()
         self.model = None  # Lazy load
         self.tokenizer = None
-
-        # Auto-detect local GGUF if extension is missing
-        if not os.path.exists(self.model_name) and os.path.exists(self.model_name + ".gguf"):
-            self.model_name += ".gguf"
-
-        self.backend = "llama" if "gguf" in self.model_name.lower() else "transformers"
+        
         print(f"ScienceEditor initialized. Model '{self.model_name}' will be loaded on first use (GPU={self.use_gpu}).")
 
-    def _detect_gpu_layers(self, total_layers: int = 32) -> int:
-        """
-        Detect a safe number of layers to load on GPU based on VRAM.
-        Defaults to 50% of layers if VRAM is limited.
-        """
-        if not self.use_gpu:
-            return 0
-        try:
-            import pynvml
-            pynvml.nvmlInit()
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            free_gb = mem_info.free / 1024**3
-            # Heuristic: assume each layer ~1GB
-            n_gpu_layers = min(total_layers, max(1, int(free_gb * 0.8)))
-            return n_gpu_layers
-        except:
-            # Fallback: assume all layers to GPU
-            return -1
-
     def _load_model(self):
-        """Internal method to load the model only when needed."""
-        print(f"Loading Model: {self.model_name}...")
+        """Internal method to load the model using Transformers."""
+        if self.model is not None:
+            return
 
-        if self.backend == "llama":
-            # Determine GPU layers
-            n_gpu_layers = self._detect_gpu_layers()
-            main_gpu = 0 if self.use_gpu else -1
-
-            # Check if it's a local file or a HF Repo
-            if os.path.exists(self.model_name):
-                print(f"Loading local GGUF: {self.model_name}")
-                self.model = Llama(
-                    model_path=self.model_name,
-                    n_ctx=32768,
-                    n_gpu_layers=n_gpu_layers,
-                    main_gpu=main_gpu,
-                    n_batch=2048,
-                    use_mmap=not self.use_gpu,  # mmap only if CPU fallback
-                    verbose=True
-                )
-            else:
-                # It's a HF Repo - Download the Q4_K_M variant by default
-                print(f"Path '{self.model_name}' not found locally. Treating as HF Repo...")
-                self.model = Llama.from_pretrained(
-                    repo_id=self.model_name,
-                    filename="Qwen3-4B-Instruct-2507-Q5_K_M.gguf",
-                    n_ctx=32768,
-                    n_gpu_layers=n_gpu_layers,
-                    main_gpu=main_gpu,
-                    n_batch=2048,
-                    use_mmap=not self.use_gpu,
-                    verbose=True
-                )
-        else:
+        print(f"Loading Model via Transformers: {self.model_name}...")
+        
+        try:
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            
+            # Smart device mapping for A100
             device_map = "auto" if self.use_gpu else "cpu"
+            
+            # Using bfloat16 is best for A100
+            torch_dtype = torch.bfloat16 if self.use_gpu else "auto"
+
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                torch_dtype="auto",
-                device_map=device_map
+                torch_dtype=torch_dtype,
+                device_map=device_map,
+                trust_remote_code=True
             )
+            print("Model loaded successfully.")
+        except Exception as e:
+            print(f"CRITICAL ERROR loading model: {e}")
+            raise e
 
     def _generate(self, prompt_text: str, max_new_tokens: int = 4096) -> str:
         """Internal helper for generation using the Transformers pipeline."""
         if self.model is None:
             self._load_model()
 
-        if self.backend == "llama":
-            # GGUF Generation
-            response = self.model.create_chat_completion(
-                messages=[
-                    {"role": "system", "content": "You are a helpful compliant research assistant. Answer strictly based on the provided text. Do not converse."},
-                    {"role": "user", "content": prompt_text}
-                ],
-                max_tokens=max_new_tokens,
-                temperature=0.7
-            )
-            return response['choices'][0]['message']['content']
-        else:
-            # Transformers Generation
-            messages = [
-                {"role": "system", "content": "You are a helpful compliant research assistant. Answer strictly based on the provided text. Do not converse."},
-                {"role": "user", "content": prompt_text}
-            ]
-            text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+        # Formatting strictly for Instruct models
+        messages = [
+            {"role": "system", "content": "You are a helpful compliant research assistant. Answer strictly based on the provided text. Do not converse."},
+            {"role": "user", "content": prompt_text}
+        ]
+        
+        input_text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        
+        model_inputs = self.tokenizer([input_text], return_tensors="pt").to(self.model.device)
 
-            generated_ids = self.model.generate(
-                **model_inputs,
-                max_new_tokens=max_new_tokens
-            )
-            output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
-            return self.tokenizer.decode(output_ids, skip_special_tokens=True)
+        generated_ids = self.model.generate(
+            **model_inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=0.7,
+            do_sample=True 
+        )
+        
+        # Decode only the new tokens
+        output_ids = generated_ids[0][len(model_inputs.input_ids[0]):]
+        return self.tokenizer.decode(output_ids, skip_special_tokens=True)
 
-    # --- Rest of your methods remain exactly the same ---
     def extract_rich_concepts(self, text: str, paper_id: str) -> list:
+        # ...existing code...
         prompt = f"""You are an NLP Knowledge Graph Architect.
 Extract entities (Models, Metrics, Datasets, Architectures) and their specific relationship to the paper.
 Relations must be specific: "OPTIMIZES", "INTRODUCES", "CRITIQUES", "USES", "TRAINS_ON", "EVALUATES_ON".
@@ -138,6 +91,7 @@ JSON:
         return self._clean_json(self._generate(prompt, max_new_tokens=300))
 
     def extract_tdms_schema(self, text: str, paper_id: str) -> list:
+        # ...existing code...
         prompt = f"""You are a Scientific Knowledge Graph Builder.
 Extract entities strictly matching these types:
 - TASK (e.g., "Extractive Summarization", "Question Answering")
@@ -155,6 +109,7 @@ JSON:
         return self._clean_json(self._generate(prompt, max_new_tokens=500))
 
     def classify_citation_intent(self, context_text: str, cited_paper_title: str) -> str:
+        # ...existing code...
         prompt = f"""Classify the citation intent for "{cited_paper_title}" based on the text.
 Categories:
 - BACKGROUND (Theoretical foundation, definitions)
@@ -167,6 +122,7 @@ Context: "...{context_text}..."
 Intent:
 """
         intent = self._generate(prompt, max_new_tokens=20).strip().upper()
+        # ...existing code...
         valid_intents = ["BACKGROUND", "METHOD", "COMPARISON", "CONTRADICTION", "EXTENSION"]
         for v in valid_intents:
             if v in intent:
@@ -174,21 +130,20 @@ Intent:
         return "BACKGROUND"
 
     def align_entity_canonical(self, entity_name: str, existing_entities: list) -> str:
-        if not existing_entities:
-            return entity_name
+        # ...existing code...
+        if not existing_entities: return entity_name
         matches = difflib.get_close_matches(entity_name, existing_entities, n=20, cutoff=0.4)
-        if not matches:
-            return entity_name
+        if not matches: return entity_name
         candidates = ", ".join(matches)
         prompt = f"""Canonicalize the entity name. If it matches an existing entity (synonym/acronym), return the existing one. Otherwise return the new one.
 Existing: {candidates}
-
 New Entity: {entity_name}
 Canonical Name:
 """
         return self._generate(prompt, max_new_tokens=20).strip()
 
     def summarize_community(self, paper_titles: list) -> str:
+        # ...existing code...
         titles_str = "\n".join([f"- {t}" for t in paper_titles])
         prompt = f"""You are an expert NLP classifier. 
 Analyze the following list of research paper titles and determine the single most specific research sub-field they belong to.
@@ -202,6 +157,7 @@ Specific Sub-Field:"""
         return self._generate(prompt, max_new_tokens=50).strip()
 
     def generate_contrastive_summary(self, paper_ids: list, context_str: str) -> dict:
+        # ...existing code...
         prompt = f"""You are a Lead Researcher performing a Meta-Analysis.
 OBJECTIVE: Synthesize the findings of the provided papers into a coherent technical narrative.
 INSTRUCTIONS:
@@ -224,6 +180,7 @@ ANALYSIS:
         return {"title": "Community Analysis", "body": content}
 
     def write_technical_article(self, task: dict, context_text: str) -> dict:
+        # ...existing code...
         task_type = task['type']
         if task_type == "COMPARATIVE_ANALYSIS":
             persona = "You are a Benchmarking Engineer."
@@ -258,6 +215,7 @@ ARTICLE:
         return {"title": task['subject'], "body": content}
 
     def _clean_json(self, text: str) -> list:
+        # ...existing code...
         try:
             text = text.strip()
             if not text.startswith("["): text = "[" + text
